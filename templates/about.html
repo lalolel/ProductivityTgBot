@@ -1,0 +1,67 @@
+{% extends "layout.html" %}
+
+{% block title %}Password Manager - About{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8 offset-md-2">
+        <h1 class="mb-4">About Our Password Manager</h1>
+        
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <h2 class="fs-4 mb-3">How It Works</h2>
+                <p>
+                    Our Password Manager is a secure Telegram bot that allows you to store and retrieve your passwords safely. 
+                    All your passwords are encrypted with a master password that only you know.
+                </p>
+                
+                <h3 class="fs-5 mt-4">Key Features:</h3>
+                <ul>
+                    <li><strong>Secure Password Storage:</strong> All passwords are encrypted using strong encryption algorithms.</li>
+                    <li><strong>User Authentication:</strong> Each user has a master password that is required to access their stored passwords.</li>
+                    <li><strong>Password Management:</strong> Add, view, update, and delete passwords.</li>
+                    <li><strong>Search Functionality:</strong> Search for passwords by service name or username.</li>
+                    <li><strong>Password Generator:</strong> Generate strong random passwords.</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <h2 class="fs-4 mb-3">Security Features</h2>
+                <ul>
+                    <li><strong>Encryption:</strong> All passwords are encrypted using Fernet symmetric encryption.</li>
+                    <li><strong>Secure Storage:</strong> Master passwords are never stored in plain text; only password hashes are stored.</li>
+                    <li><strong>Zero Knowledge:</strong> The bot doesn't know your actual passwords; they are only decrypted when you need them.</li>
+                    <li><strong>Session Management:</strong> User sessions expire after a period of inactivity.</li>
+                    <li><strong>Secure Input:</strong> Messages containing passwords are deleted immediately after processing.</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <h2 class="fs-4 mb-3">Getting Started</h2>
+                <ol>
+                    <li>Start the bot by sending <code>/start</code></li>
+                    <li>Create a master password</li>
+                    <li>Use the menu buttons to add, view, or manage your passwords</li>
+                </ol>
+                
+                <h3 class="fs-5 mt-4">Commands:</h3>
+                <ul>
+                    <li><code>/start</code> - Start or resume your session</li>
+                    <li><code>/help</code> - Show help message</li>
+                    <li><code>/cancel</code> - Cancel current operation</li>
+                </ul>
+                
+                <div class="d-grid gap-2 col-md-6 mx-auto mt-4">
+                    <a href="https://t.me/claptrapw_bot" class="btn btn-primary" target="_blank">
+                        <i class="bi bi-telegram me-2"></i>Start Using Now
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
