@@ -14,20 +14,61 @@ from utils import (
     validate_service_name, 
     validate_username, 
     generate_password,
+    calculate_password_strength,
     format_password_details,
-    sanitize_input
+    sanitize_input,
+    import_passwords_from_json,
+    export_passwords_to_json
 )
-from models import User, Password, UserSession
+from models import User, Password, UserSession, Category, SecureNote, CustomField
 from config import MIN_MASTER_PASSWORD_LENGTH
 
 # Define states for different operations
 class RegistrationStates(StatesGroup):
     waiting_for_master_password = State()
     confirm_master_password = State()
-
-
+    
 class AuthenticationStates(StatesGroup):
     waiting_for_master_password = State()
+    
+class PasswordStates(StatesGroup):
+    waiting_for_service = State()
+    waiting_for_username = State()
+    waiting_for_password = State()
+    waiting_for_notes = State()
+    confirm_add = State()
+    confirm_delete = State()
+    confirm_update = State()
+    
+class CategoryStates(StatesGroup):
+    waiting_for_name = State()
+    confirm_delete = State()
+    add_category = State()
+    edit_category = State()
+    delete_category = State()
+    set_password_category = State()
+    set_note_category = State()
+    
+class SecureNoteStates(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_content = State()
+    confirm_add = State()
+    update_title = State()
+    update_content = State()
+    confirm_update = State()
+    confirm_delete = State()
+    
+class PasswordGeneratorStates(StatesGroup):
+    set_length = State()
+    
+class ImportExportStates(StatesGroup):
+    waiting_for_import_file = State()
+    confirm_import = State()
+    select_export_format = State()
+    select_export_type = State()
+
+# Global dictionary to store password generator options for each user
+password_gen_options = {}
 
 
 class AddPasswordStates(StatesGroup):
@@ -64,10 +105,1580 @@ class ChangeMasterPasswordStates(StatesGroup):
 class DeleteAccountStates(StatesGroup):
     confirm_delete = State()
     enter_master_password = State()
+    
+    
+class CategoryStates(StatesGroup):
+    add_category = State()
+    edit_category = State()
+    delete_category = State()
+    set_password_category = State()
+    set_note_category = State()
+
+
+class SecureNoteStates(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_content = State()
+    confirm_add = State()
+    update_title = State()
+    update_content = State()
+    confirm_update = State()
+    confirm_delete = State()
+
+
+# Duplicate classes removed
+    
+    
+class PasswordShareStates(StatesGroup):
+    select_user = State()
+    confirm_share = State()
+    set_expiration = State()
+
+
+# Category related handlers
+async def cmd_categories(message: types.Message):
+    """Handle categories command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Get categories for the user
+    categories = await db.get_categories(user_id)
+    
+    await message.answer(
+        "📁 <b>Categories</b>\n\n"
+        "Organize your passwords and secure notes in categories for easy access.\n"
+        "Select a category to view its contents:",
+        reply_markup=Keyboards.categories_keyboard(categories),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_category_action(callback_query: CallbackQuery):
+    """Handle category selection."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    data = callback_query.data
+    
+    if data == "category_all":
+        # Show all passwords
+        passwords = await db.get_all_passwords(user_id)
+        
+        if not passwords:
+            await callback_query.message.edit_text(
+                "You don't have any passwords yet. Add some passwords first.",
+                reply_markup=Keyboards.back_to_main_inline()
+            )
+            return
+        
+        # Prepare message
+        message_text = "🔍 <b>All Passwords</b>\n\n"
+        
+        # Display paginated passwords
+        page = 0
+        page_size = 5
+        total_pages = (len(passwords) + page_size - 1) // page_size
+        
+        # Create keyboard with pagination
+        keyboard = Keyboards.paginated_password_list(passwords, page)
+        
+        await callback_query.message.edit_text(
+            message_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        
+    elif data == "category_none":
+        # Show uncategorized passwords
+        passwords = await db.get_passwords_by_category(user_id, None)
+        
+        if not passwords:
+            await callback_query.message.edit_text(
+                "You don't have any uncategorized passwords.",
+                reply_markup=Keyboards.back_to_categories_inline()
+            )
+            return
+        
+        # Prepare message
+        message_text = "📂 <b>Uncategorized Passwords</b>\n\n"
+        
+        # Display paginated passwords
+        page = 0
+        keyboard = Keyboards.paginated_password_list(passwords, page)
+        
+        await callback_query.message.edit_text(
+            message_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        
+    elif data.startswith("category_"):
+        # Extract category id
+        category_id = int(data.split("_")[1])
+        
+        # Get category info
+        category = await db.get_category(category_id, user_id)
+        
+        if not category:
+            await callback_query.message.edit_text(
+                "Category not found.",
+                reply_markup=Keyboards.back_to_categories_inline()
+            )
+            return
+        
+        # Get passwords in this category
+        passwords = await db.get_passwords_by_category(user_id, category_id)
+        
+        # Get secure notes in this category
+        notes = await db.get_secure_notes_by_category(user_id, category_id)
+        
+        if not passwords and not notes:
+            await callback_query.message.edit_text(
+                f"Category '{category['name']}' is empty. Add some passwords or notes to this category.",
+                reply_markup=Keyboards.back_to_categories_inline()
+            )
+            return
+        
+        # Prepare message
+        message_text = f"📂 <b>Category: {category['name']}</b>\n\n"
+        
+        if passwords:
+            message_text += "<b>Passwords:</b>\n"
+            # Display paginated passwords
+            page = 0
+            keyboard = Keyboards.paginated_password_list(passwords, page, include_category_back=True)
+        else:
+            message_text += "<b>No passwords in this category</b>\n"
+            
+        if notes:
+            if not passwords:
+                message_text += "\n"
+            message_text += "<b>Secure Notes:</b>\n"
+            # For now, just show the number of notes
+            message_text += f"{len(notes)} secure notes found.\n"
+            
+        await callback_query.message.edit_text(
+            message_text,
+            reply_markup=keyboard if passwords else Keyboards.back_to_categories_inline(),
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def manage_categories(callback_query: CallbackQuery):
+    """Handle manage categories button."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Get categories for the user
+    categories = await db.get_categories(user_id)
+    
+    await callback_query.message.edit_text(
+        "📁 <b>Manage Categories</b>\n\n"
+        "Add, edit, or delete categories.",
+        reply_markup=Keyboards.manage_categories_keyboard(categories),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def add_category(callback_query: CallbackQuery):
+    """Handle add category button."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    await CategoryStates.add_category.set()
+    
+    await callback_query.message.edit_text(
+        "📝 <b>Add New Category</b>\n\n"
+        "Please enter a name for the new category:",
+        reply_markup=Keyboards.cancel_inline(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_category_name(message: types.Message, state: FSMContext):
+    """Process new category name."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    # Sanitize and validate the input
+    category_name = sanitize_input(message.text.strip())
+    
+    if not category_name:
+        await message.answer(
+            "❌ Category name cannot be empty. Please try again:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    if len(category_name) > 50:
+        await message.answer(
+            "❌ Category name is too long (max 50 characters). Please try again:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    # Add the category
+    category_id = await db.add_category(user_id, category_name)
+    
+    if category_id:
+        # Log the action
+        await db.add_audit_log(
+            user_id, 
+            "create", 
+            "category", 
+            category_id, 
+            {"name": category_name}
+        )
+        
+        await message.answer(
+            f"✅ Category '{category_name}' added successfully.",
+            reply_markup=Keyboards.main_menu()
+        )
+    else:
+        await message.answer(
+            "❌ Failed to add category. Please try again later.",
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    # Clear state
+    await state.finish()
+
+
+async def edit_category(callback_query: CallbackQuery, state: FSMContext):
+    """Handle edit category button."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Extract category id
+    category_id = int(callback_query.data.split("_")[-1])
+    
+    # Get category info
+    category = await db.get_category(category_id, user_id)
+    
+    if not category:
+        await callback_query.message.edit_text(
+            "Category not found.",
+            reply_markup=Keyboards.back_to_categories_inline()
+        )
+        return
+    
+    # Store category id in state
+    await state.update_data(category_id=category_id, current_name=category['name'])
+    await CategoryStates.edit_category.set()
+    
+    await callback_query.message.edit_text(
+        f"✏️ <b>Edit Category</b>\n\n"
+        f"Current name: <b>{category['name']}</b>\n\n"
+        f"Please enter a new name for the category:",
+        reply_markup=Keyboards.cancel_inline(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_edit_category_name(message: types.Message, state: FSMContext):
+    """Process edited category name."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    # Get state data
+    data = await state.get_data()
+    category_id = data.get("category_id")
+    current_name = data.get("current_name")
+    
+    # Sanitize and validate the input
+    new_name = sanitize_input(message.text.strip())
+    
+    if not new_name:
+        await message.answer(
+            "❌ Category name cannot be empty. Please try again:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    if len(new_name) > 50:
+        await message.answer(
+            "❌ Category name is too long (max 50 characters). Please try again:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    if new_name == current_name:
+        await message.answer(
+            "❌ New name is the same as the current name. No changes made.",
+            reply_markup=Keyboards.main_menu()
+        )
+        await state.finish()
+        return
+    
+    # Update the category
+    success = await db.update_category(category_id, user_id, new_name)
+    
+    if success:
+        # Log the action
+        await db.add_audit_log(
+            user_id, 
+            "update", 
+            "category", 
+            category_id, 
+            {"old_name": current_name, "new_name": new_name}
+        )
+        
+        await message.answer(
+            f"✅ Category renamed from '{current_name}' to '{new_name}'.",
+            reply_markup=Keyboards.main_menu()
+        )
+    else:
+        await message.answer(
+            "❌ Failed to update category. Please try again later.",
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    # Clear state
+    await state.finish()
+
+
+async def delete_category(callback_query: CallbackQuery, state: FSMContext):
+    """Handle delete category button."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Extract category id
+    category_id = int(callback_query.data.split("_")[-1])
+    
+    # Get category info
+    category = await db.get_category(category_id, user_id)
+    
+    if not category:
+        await callback_query.message.edit_text(
+            "Category not found.",
+            reply_markup=Keyboards.back_to_categories_inline()
+        )
+        return
+    
+    # Get passwords in this category
+    passwords = await db.get_passwords_by_category(user_id, category_id)
+    
+    # Get secure notes in this category
+    notes = await db.get_secure_notes_by_category(user_id, category_id)
+    
+    # Store category id in state
+    await state.update_data(
+        category_id=category_id, 
+        category_name=category['name'],
+        password_count=len(passwords),
+        note_count=len(notes)
+    )
+    await CategoryStates.delete_category.set()
+    
+    warning_text = ""
+    if passwords or notes:
+        warning_text = (
+            f"⚠️ <b>Warning:</b> This category contains {len(passwords)} password(s) "
+            f"and {len(notes)} note(s). Deleting this category will move all items to 'Uncategorized'.\n\n"
+        )
+    
+    await callback_query.message.edit_text(
+        f"🗑️ <b>Delete Category</b>\n\n"
+        f"Are you sure you want to delete the category '{category['name']}'?\n\n"
+        f"{warning_text}"
+        f"This action cannot be undone.",
+        reply_markup=Keyboards.confirm_delete_category_keyboard(category_id),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_delete_category(callback_query: CallbackQuery, state: FSMContext):
+    """Process category deletion confirmation."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    data = await state.get_data()
+    category_id = data.get("category_id")
+    category_name = data.get("category_name")
+    
+    if callback_query.data == f"confirm_delete_category_yes_{category_id}":
+        # Delete the category
+        success = await db.delete_category(category_id, user_id)
+        
+        if success:
+            # Log the action
+            await db.add_audit_log(
+                user_id, 
+                "delete", 
+                "category", 
+                category_id, 
+                {"name": category_name}
+            )
+            
+            await callback_query.message.edit_text(
+                f"✅ Category '{category_name}' deleted successfully.",
+                reply_markup=Keyboards.back_to_categories_inline()
+            )
+        else:
+            await callback_query.message.edit_text(
+                "❌ Failed to delete category. Please try again later.",
+                reply_markup=Keyboards.back_to_categories_inline()
+            )
+    else:
+        # User canceled the deletion
+        await callback_query.message.edit_text(
+            f"❌ Category deletion canceled.",
+            reply_markup=Keyboards.back_to_categories_inline()
+        )
+    
+    # Clear state
+    await state.finish()
+
+
+async def back_to_categories(callback_query: CallbackQuery):
+    """Handle back to categories button."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Get categories for the user
+    categories = await db.get_categories(user_id)
+    
+    await callback_query.message.edit_text(
+        "📁 <b>Categories</b>\n\n"
+        "Organize your passwords and secure notes in categories for easy access.\n"
+        "Select a category to view its contents:",
+        reply_markup=Keyboards.categories_keyboard(categories),
+        parse_mode=ParseMode.HTML
+    )
+
+
+# Tools related handlers
+async def cmd_tools(message: types.Message):
+    """Handle tools command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    await message.answer(
+        "⚒️ <b>Tools</b>\n\n"
+        "Select a tool:",
+        reply_markup=Keyboards.tools_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    
+    
+# Secure note handlers
+async def cmd_add_note(message: types.Message):
+    """Handle add note command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    await SecureNoteStates.waiting_for_title.set()
+    
+    await message.answer(
+        "📋 <b>Add Secure Note</b>\n\n"
+        "Please enter a title for your note:",
+        reply_markup=Keyboards.cancel_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_note_title(message: types.Message, state: FSMContext):
+    """Process secure note title."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    # Sanitize and validate the input
+    title = sanitize_input(message.text.strip())
+    
+    if not title:
+        await message.answer(
+            "❌ Title cannot be empty. Please try again:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    if len(title) > 100:
+        await message.answer(
+            "❌ Title is too long (max 100 characters). Please try again:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    # Store title in state
+    await state.update_data(title=title)
+    await SecureNoteStates.waiting_for_content.set()
+    
+    await message.answer(
+        f"✅ Title: <b>{title}</b>\n\n"
+        f"Now please enter the content of your note:",
+        reply_markup=Keyboards.cancel_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_note_content(message: types.Message, state: FSMContext):
+    """Process secure note content."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    # Sanitize the input
+    content = sanitize_input(message.text)
+    
+    if not content:
+        await message.answer(
+            "❌ Content cannot be empty. Please try again:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    # Store content in state
+    await state.update_data(content=content)
+    
+    # Get data from state
+    data = await state.get_data()
+    title = data.get("title")
+    
+    # Encrypt the content
+    master_password = session.master_password
+    encrypted_content = PasswordEncryption.encrypt_password(content, master_password)
+    
+    # Store encrypted content in state
+    await state.update_data(encrypted_content=encrypted_content)
+    await SecureNoteStates.confirm_add.set()
+    
+    # Show preview and confirmation
+    await message.answer(
+        f"📋 <b>Secure Note Preview</b>\n\n"
+        f"<b>Title:</b> {title}\n"
+        f"<b>Content:</b> {content}\n\n"
+        f"Save this note?",
+        reply_markup=Keyboards.confirmation_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def confirm_add_note(callback_query: CallbackQuery, state: FSMContext):
+    """Handle confirmation of adding a note."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    if callback_query.data == "confirm_yes":
+        # Get data from state
+        data = await state.get_data()
+        title = data.get("title")
+        encrypted_content = data.get("encrypted_content")
+        
+        # Add note to database
+        note_id = await db.add_secure_note(user_id, title, encrypted_content)
+        
+        if note_id:
+            # Log the action
+            await db.add_audit_log(
+                user_id, 
+                "create", 
+                "secure_note", 
+                note_id, 
+                {"title": title}
+            )
+            
+            await callback_query.message.edit_text(
+                f"✅ Secure note '{title}' added successfully.",
+                reply_markup=Keyboards.back_to_main_inline()
+            )
+        else:
+            await callback_query.message.edit_text(
+                "❌ Failed to add secure note. Please try again later.",
+                reply_markup=Keyboards.back_to_main_inline()
+            )
+    else:
+        # User canceled the operation
+        await callback_query.message.edit_text(
+            "❌ Operation canceled.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+    
+    # Clear state
+    await state.finish()
+
+
+async def cmd_view_notes(message: types.Message):
+    """Handle view notes command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Get all secure notes for this user
+    notes = await db.get_all_secure_notes(user_id)
+    
+    if not notes:
+        await message.answer(
+            "You don't have any secure notes yet. Use the 'Add Note' option to create one.",
+            reply_markup=Keyboards.main_menu()
+        )
+        return
+    
+    # Create paginated list of notes
+    page = 0
+    keyboard = Keyboards.paginated_note_list(notes, page)
+    
+    await message.answer(
+        "📑 <b>Your Secure Notes</b>\n\n"
+        "Select a note to view:",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def view_note(callback_query: CallbackQuery):
+    """Handle viewing a secure note."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Extract note id
+    note_id = int(callback_query.data.split("_")[-1])
+    
+    # Get note from database
+    note = await db.get_secure_note(note_id, user_id)
+    
+    if not note:
+        await callback_query.message.edit_text(
+            "Note not found.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+        return
+    
+    # Decrypt the content
+    master_password = session.master_password
+    decrypted_content = PasswordEncryption.decrypt_password(
+        note['encrypted_content'],
+        master_password
+    )
+    
+    # Get category name if any
+    category_name = "Uncategorized"
+    if note['category_id']:
+        category = await db.get_category(note['category_id'], user_id)
+        if category:
+            category_name = category['name']
+    
+    # Format date
+    created_at = note['created_at'].strftime("%Y-%m-%d %H:%M")
+    updated_at = note['updated_at'].strftime("%Y-%m-%d %H:%M") if note['updated_at'] else created_at
+    
+    # Log the view action
+    await db.add_audit_log(
+        user_id, 
+        "view", 
+        "secure_note", 
+        note_id, 
+        {"title": note['title']}
+    )
+    
+    # Display note with options
+    await callback_query.message.edit_text(
+        f"📋 <b>{note['title']}</b>\n\n"
+        f"{decrypted_content}\n\n"
+        f"<b>Category:</b> {category_name}\n"
+        f"<b>Created:</b> {created_at}\n"
+        f"<b>Last Updated:</b> {updated_at}",
+        reply_markup=Keyboards.secure_note_detail_keyboard(note_id),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def update_note(callback_query: CallbackQuery, state: FSMContext):
+    """Handle updating a note."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Extract note id
+    note_id = int(callback_query.data.split("_")[-1])
+    
+    # Get note from database
+    note = await db.get_secure_note(note_id, user_id)
+    
+    if not note:
+        await callback_query.message.edit_text(
+            "Note not found.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+        return
+    
+    # Store note id and title in state
+    await state.update_data(note_id=note_id, current_title=note['title'])
+    await SecureNoteStates.update_title.set()
+    
+    # Prompt for new title
+    await callback_query.message.edit_text(
+        f"✏️ <b>Update Note</b>\n\n"
+        f"Current title: <b>{note['title']}</b>\n\n"
+        f"Enter a new title or send the same title to keep it:",
+        reply_markup=Keyboards.cancel_inline(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def delete_note(callback_query: CallbackQuery, state: FSMContext):
+    """Handle deleting a note."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Extract note id
+    note_id = int(callback_query.data.split("_")[-1])
+    
+    # Get note from database
+    note = await db.get_secure_note(note_id, user_id)
+    
+    if not note:
+        await callback_query.message.edit_text(
+            "Note not found.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+        return
+    
+    # Store note id and title in state
+    await state.update_data(note_id=note_id, note_title=note['title'])
+    await SecureNoteStates.confirm_delete.set()
+    
+    # Ask for confirmation
+    await callback_query.message.edit_text(
+        f"🗑️ <b>Delete Note</b>\n\n"
+        f"Are you sure you want to delete the note '{note['title']}'?\n\n"
+        f"This action cannot be undone.",
+        reply_markup=Keyboards.confirmation_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def back_to_notes_list(callback_query: CallbackQuery):
+    """Handle back to notes list button."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Get all secure notes for this user
+    notes = await db.get_all_secure_notes(user_id)
+    
+    if not notes:
+        await callback_query.message.edit_text(
+            "You don't have any secure notes yet.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+        return
+    
+    # Create paginated list of notes
+    page = 0
+    keyboard = Keyboards.paginated_note_list(notes, page)
+    
+    await callback_query.message.edit_text(
+        "📑 <b>Your Secure Notes</b>\n\n"
+        "Select a note to view:",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_notes_pagination(callback_query: CallbackQuery):
+    """Handle notes pagination."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Extract page number
+    page = int(callback_query.data.split("_")[-1])
+    
+    # Get all secure notes for this user
+    notes = await db.get_all_secure_notes(user_id)
+    
+    # Create paginated list of notes
+    keyboard = Keyboards.paginated_note_list(notes, page)
+    
+    await callback_query.message.edit_text(
+        "📑 <b>Your Secure Notes</b>\n\n"
+        "Select a note to view:",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+
+# Password generator handlers
+async def cmd_password_generator(message: types.Message):
+    """Handle password generator command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Initialize generator options
+    password_gen_options[user_id] = {
+        "length": 16,
+        "use_uppercase": True,
+        "use_lowercase": True,
+        "use_digits": True,
+        "use_special": True,
+        "exclude_similar": False,
+        "exclude_ambiguous": False,
+        "pronounceable": False
+    }
+    
+    await message.answer(
+        "🎲 <b>Password Generator</b>\n\n"
+        "Configure your password generation options:",
+        reply_markup=Keyboards.password_generator_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_password_generator_options(callback_query: CallbackQuery, state: FSMContext):
+    """Handle password generator options."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    data = callback_query.data
+    
+    if data == "set_length":
+        await PasswordGeneratorStates.set_length.set()
+        await callback_query.message.edit_text(
+            "🔢 <b>Set Password Length</b>\n\n"
+            "Please enter a number between 8 and 64:",
+            reply_markup=Keyboards.cancel_inline(),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    elif data == "generate_password":
+        # Generate password
+        options = password_gen_options.get(user_id, {})
+        
+        try:
+            password = generate_password(
+                length=options.get("length", 16),
+                use_uppercase=options.get("use_uppercase", True),
+                use_lowercase=options.get("use_lowercase", True),
+                use_digits=options.get("use_digits", True),
+                use_special=options.get("use_special", True),
+                exclude_similar=options.get("exclude_similar", False),
+                exclude_ambiguous=options.get("exclude_ambiguous", False),
+                pronounceable=options.get("pronounceable", False)
+            )
+            
+            # Calculate password strength
+            strength = calculate_password_strength(password)
+            
+            # Format strength info
+            strength_text = f"Strength: {strength['score']}/5 ({strength['rating']})"
+            time_to_crack = strength.get('crack_time_display', 'unknown')
+            
+            # Log generation
+            await db.add_audit_log(
+                user_id, 
+                "generate", 
+                "password", 
+                None, 
+                {"length": options.get("length", 16)}
+            )
+            
+            # Show the generated password
+            await callback_query.message.edit_text(
+                f"🎲 <b>Generated Password</b>\n\n"
+                f"<code>{password}</code>\n\n"
+                f"<b>{strength_text}</b>\n"
+                f"Time to crack: {time_to_crack}\n\n"
+                f"Press 'Generate Again' to create another password.",
+                reply_markup=Keyboards.password_generator_result_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.error(f"Error generating password: {e}")
+            await callback_query.message.edit_text(
+                f"❌ Error generating password. Please try again.",
+                reply_markup=Keyboards.back_to_tools_inline(),
+                parse_mode=ParseMode.HTML
+            )
+        return
+    
+    # Handle toggles
+    if data.startswith("toggle_"):
+        option = data.replace("toggle_", "")
+        options = password_gen_options.get(user_id, {})
+        
+        if option == "lowercase":
+            options["use_lowercase"] = not options.get("use_lowercase", True)
+        elif option == "uppercase":
+            options["use_uppercase"] = not options.get("use_uppercase", True)
+        elif option == "digits":
+            options["use_digits"] = not options.get("use_digits", True)
+        elif option == "special":
+            options["use_special"] = not options.get("use_special", True)
+        elif option == "similar":
+            options["exclude_similar"] = not options.get("exclude_similar", False)
+        elif option == "ambiguous":
+            options["exclude_ambiguous"] = not options.get("exclude_ambiguous", False)
+        elif option == "pronounceable":
+            options["pronounceable"] = not options.get("pronounceable", False)
+            
+            # If pronounceable is enabled, disable incompatible options
+            if options["pronounceable"]:
+                options["use_special"] = False
+        
+        # Update options
+        password_gen_options[user_id] = options
+        
+        # Update keyboard
+        keyboard = Keyboards.password_generator_keyboard(
+            length=options.get("length", 16),
+            use_lowercase=options.get("use_lowercase", True),
+            use_uppercase=options.get("use_uppercase", True),
+            use_digits=options.get("use_digits", True),
+            use_special=options.get("use_special", True),
+            exclude_similar=options.get("exclude_similar", False),
+            exclude_ambiguous=options.get("exclude_ambiguous", False),
+            pronounceable=options.get("pronounceable", False)
+        )
+        
+        await callback_query.message.edit_text(
+            "🎲 <b>Password Generator</b>\n\n"
+            "Configure your password generation options:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def process_password_length(message: types.Message, state: FSMContext):
+    """Process password length."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    try:
+        length = int(message.text.strip())
+        
+        if length < 8 or length > 64:
+            await message.answer(
+                "❌ Password length must be between 8 and 64. Please try again:",
+                reply_markup=Keyboards.cancel_keyboard()
+            )
+            return
+        
+        # Update options
+        options = password_gen_options.get(user_id, {})
+        options["length"] = length
+        password_gen_options[user_id] = options
+        
+        await message.answer(
+            f"✅ Password length set to {length}.",
+            reply_markup=Keyboards.main_menu()
+        )
+        
+        # Clear state
+        await state.finish()
+        
+        # Show generator options again
+        keyboard = Keyboards.password_generator_keyboard(
+            length=options.get("length", 16),
+            use_lowercase=options.get("use_lowercase", True),
+            use_uppercase=options.get("use_uppercase", True),
+            use_digits=options.get("use_digits", True),
+            use_special=options.get("use_special", True),
+            exclude_similar=options.get("exclude_similar", False),
+            exclude_ambiguous=options.get("exclude_ambiguous", False),
+            pronounceable=options.get("pronounceable", False)
+        )
+        
+        await message.answer(
+            "🎲 <b>Password Generator</b>\n\n"
+            "Configure your password generation options:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+    except ValueError:
+        await message.answer(
+            "❌ Invalid input. Please enter a number between 8 and 64:",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+
+
+async def cmd_password_strength_checker(message: types.Message):
+    """Handle password strength checker command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    await message.answer(
+        "🔍 <b>Password Strength Checker</b>\n\n"
+        "Please enter the password you want to check:\n\n"
+        "<i>Note: This password will be analyzed locally and won't be stored anywhere.</i>",
+        reply_markup=Keyboards.cancel_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    
+    
+async def cmd_import_passwords(message: types.Message):
+    """Handle import passwords command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    await ImportExportStates.waiting_for_import_file.set()
+    
+    await message.answer(
+        "🔄 <b>Import Passwords</b>\n\n"
+        "Please send a JSON file containing the passwords you want to import.\n\n"
+        "The file should be in the format:\n"
+        "<code>[\n"
+        "  {\n"
+        "    \"service\": \"Service Name\",\n"
+        "    \"username\": \"username\",\n"
+        "    \"password\": \"password\",\n"
+        "    \"notes\": \"Optional notes\"\n"
+        "  },\n"
+        "  ...\n"
+        "]</code>",
+        reply_markup=Keyboards.cancel_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def process_import_file(message: types.Message, state: FSMContext):
+    """Process import file."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    # Check if message has document
+    if not message.document:
+        await message.answer(
+            "❌ Please send a JSON file.",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    # Check file extension
+    if not message.document.file_name.lower().endswith('.json'):
+        await message.answer(
+            "❌ Only JSON files are supported.",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+        return
+    
+    try:
+        # Download the file
+        file = await message.document.download()
+        
+        # Read the file
+        with open(file.name, 'r') as f:
+            json_data = f.read()
+        
+        # Try to parse the JSON
+        import json
+        try:
+            data = json.loads(json_data)
+        except json.JSONDecodeError:
+            await message.answer(
+                "❌ Invalid JSON format. Please check your file.",
+                reply_markup=Keyboards.cancel_keyboard()
+            )
+            return
+        
+        # Validate data structure
+        if not isinstance(data, list):
+            await message.answer(
+                "❌ The JSON data should be a list of password entries.",
+                reply_markup=Keyboards.cancel_keyboard()
+            )
+            return
+        
+        # Count valid entries
+        valid_entries = []
+        for entry in data:
+            if isinstance(entry, dict) and "service" in entry and "username" in entry and "password" in entry:
+                valid_entries.append(entry)
+        
+        # Store in state
+        await state.update_data(import_data=valid_entries)
+        await ImportExportStates.confirm_import.set()
+        
+        # Ask for confirmation
+        await message.answer(
+            f"📄 <b>Import Confirmation</b>\n\n"
+            f"Found {len(valid_entries)} valid password entries to import.\n\n"
+            f"Do you want to proceed with the import?",
+            reply_markup=Keyboards.confirmation_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logging.error(f"Error processing import file: {e}")
+        await message.answer(
+            f"❌ Error processing file: {str(e)}",
+            reply_markup=Keyboards.cancel_keyboard()
+        )
+
+
+async def confirm_import(callback_query: CallbackQuery, state: FSMContext):
+    """Handle import confirmation."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    if callback_query.data == "confirm_yes":
+        # Get data from state
+        data = await state.get_data()
+        import_data = data.get("import_data", [])
+        
+        if not import_data:
+            await callback_query.message.edit_text(
+                "❌ No valid data to import.",
+                reply_markup=Keyboards.back_to_main_inline()
+            )
+            await state.finish()
+            return
+        
+        # Get master password from session
+        master_password = session.master_password
+        
+        # Import passwords
+        success_count = 0
+        for entry in import_data:
+            service_name = entry.get("service", "").strip()
+            username = entry.get("username", "").strip()
+            password = entry.get("password", "")
+            notes = entry.get("notes", "")
+            
+            # Skip invalid entries
+            if not service_name or not username or not password:
+                continue
+            
+            # Encrypt password
+            encrypted_password = PasswordEncryption.encrypt_password(password, master_password)
+            
+            # Add to database
+            password_id = await db.add_password(
+                user_id, 
+                service_name, 
+                username, 
+                encrypted_password, 
+                notes
+            )
+            
+            if password_id:
+                success_count += 1
+        
+        # Log the import
+        await db.add_audit_log(
+            user_id, 
+            "import", 
+            "passwords", 
+            None, 
+            {"count": success_count}
+        )
+        
+        # Show result
+        await callback_query.message.edit_text(
+            f"✅ Successfully imported {success_count} out of {len(import_data)} passwords.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+    else:
+        # User canceled the operation
+        await callback_query.message.edit_text(
+            "❌ Import canceled.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+    
+    # Clear state
+    await state.finish()
+
+
+async def cmd_export_data(message: types.Message):
+    """Handle export data command."""
+    user_id = message.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await message.answer(
+            "You need to authenticate first. Use /start to begin.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    await ImportExportStates.select_export_format.set()
+    
+    await message.answer(
+        "📤 <b>Export Data</b>\n\n"
+        "Select the export format:",
+        reply_markup=Keyboards.export_format_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def export_data_format(callback_query: CallbackQuery, state: FSMContext):
+    """Handle export format selection."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    if callback_query.data == "export_format_json":
+        # Store format in state
+        await state.update_data(export_format="json")
+        await ImportExportStates.select_export_type.set()
+        
+        # Ask for data type
+        await callback_query.message.edit_text(
+            "📤 <b>Export Data</b>\n\n"
+            "Select what you want to export:",
+            reply_markup=Keyboards.export_type_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        # Back to main
+        await callback_query.message.edit_text(
+            "❌ Export canceled.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+        await state.finish()
+
+
+async def export_data_type(callback_query: CallbackQuery, state: FSMContext):
+    """Handle export type selection."""
+    await callback_query.answer()
+    
+    user_id = callback_query.from_user.id
+    session = get_user_session(user_id)
+    
+    if not session.is_authenticated():
+        await callback_query.message.answer(
+            "Your session has expired. Please authenticate again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.finish()
+        return
+    
+    if callback_query.data.startswith("export_type_"):
+        export_type = callback_query.data.replace("export_type_", "")
+        
+        # Get data from database
+        master_password = session.master_password
+        passwords = []
+        notes = []
+        
+        if export_type in ["passwords", "all"]:
+            # Get all passwords
+            encrypted_passwords = await db.get_all_passwords(user_id)
+            
+            # Decrypt passwords
+            for p in encrypted_passwords:
+                p_copy = p.copy()
+                p_copy["password"] = PasswordEncryption.decrypt_password(
+                    p["encrypted_password"],
+                    master_password
+                )
+                p_copy.pop("encrypted_password", None)
+                passwords.append(p_copy)
+        
+        if export_type in ["notes", "all"]:
+            # Get all notes
+            encrypted_notes = await db.get_all_secure_notes(user_id)
+            
+            # Decrypt notes
+            for n in encrypted_notes:
+                n_copy = n.copy()
+                n_copy["content"] = PasswordEncryption.decrypt_password(
+                    n["encrypted_content"],
+                    master_password
+                )
+                n_copy.pop("encrypted_content", None)
+                notes.append(n_copy)
+        
+        # Generate export data
+        import json
+        
+        if export_type == "passwords":
+            export_data = json.dumps(passwords, indent=2)
+            filename = f"passwords_export_{user_id}.json"
+        elif export_type == "notes":
+            export_data = json.dumps(notes, indent=2)
+            filename = f"notes_export_{user_id}.json"
+        else:  # all
+            export_data = json.dumps({
+                "passwords": passwords,
+                "notes": notes
+            }, indent=2)
+            filename = f"data_export_{user_id}.json"
+        
+        # Create temporary file
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(delete=False, mode='w+', suffix='.json')
+        temp_file.write(export_data)
+        temp_file.close()
+        
+        # Log the export
+        await db.add_audit_log(
+            user_id, 
+            "export", 
+            export_type, 
+            None, 
+            {"count": len(passwords) if export_type == "passwords" else 
+                     len(notes) if export_type == "notes" else 
+                     len(passwords) + len(notes)}
+        )
+        
+        # Send the file
+        with open(temp_file.name, 'rb') as f:
+            await callback_query.message.answer_document(
+                document=types.InputFile(f, filename=filename),
+                caption=f"✅ Export completed successfully.\n\n"
+                       f"Contents: {len(passwords)} passwords"
+                       f"{' and ' + str(len(notes)) + ' notes' if export_type in ['notes', 'all'] else ''}."
+            )
+        
+        # Send a message with back button
+        await callback_query.message.edit_text(
+            "✅ Export completed.",
+            reply_markup=Keyboards.back_to_main_inline()
+        )
+    else:
+        # Back to tools
+        await callback_query.message.edit_text(
+            "❌ Export canceled.",
+            reply_markup=Keyboards.back_to_tools_inline()
+        )
+    
+    # Clear state
+    await state.finish()
 
 
 # Dictionary to store user sessions
 user_sessions = {}
+
+# Dictionary to store password generation options
+password_gen_options = {}
 
 
 # Handler to get or create a user session
@@ -124,21 +1735,27 @@ async def cmd_help(message: types.Message):
         
         "<b>Features:</b>\n"
         "• Secure storage of your passwords\n"
+        "• Organize passwords with categories\n"
         "• Add, view, update, and delete passwords\n"
+        "• Create and manage secure notes\n"
         "• Search for passwords by service or username\n"
         "• Generate strong random passwords\n"
+        "• Share passwords with other users\n"
+        "• Import and export your data\n"
         "• Change your master password\n\n"
         
         "<b>Security:</b>\n"
-        "• All passwords are encrypted with your master password\n"
+        "• All sensitive data is encrypted with your master password\n"
         "• Your master password is never stored in plain text\n"
-        "• Passwords are only decrypted when you need them\n"
+        "• Data is only decrypted when you need it\n"
         "• Session automatically expires after inactivity\n\n"
         
         "<b>Tips:</b>\n"
         "• Use a strong, unique master password\n"
         "• Don't forget your master password - it cannot be recovered!\n"
         "• Use the 'Generate' option to create strong passwords\n"
+        "• Organize passwords in categories for easy access\n"
+        "• Use secure notes for storing sensitive text information\n"
     )
     
     await message.answer(help_text, parse_mode=ParseMode.HTML)
@@ -1483,6 +3100,43 @@ def register_handlers(dp: Dispatcher):
     dp.register_message_handler(cmd_delete_account, Text(equals="🗑 Delete Account"))
     dp.register_message_handler(cmd_start, Text(equals="⬅️ Back to Main Menu"))
     
+    # Category handlers
+    dp.register_message_handler(cmd_categories, Text(equals="📁 Categories"))
+    dp.register_callback_query_handler(process_category_action, lambda c: c.data.startswith("category_"))
+    dp.register_callback_query_handler(manage_categories, lambda c: c.data == "manage_categories")
+    dp.register_callback_query_handler(add_category, lambda c: c.data == "add_category")
+    dp.register_callback_query_handler(edit_category, lambda c: c.data.startswith("edit_category_"))
+    dp.register_callback_query_handler(delete_category, lambda c: c.data.startswith("delete_category_"))
+    dp.register_callback_query_handler(back_to_categories, lambda c: c.data == "back_to_categories")
+    dp.register_message_handler(process_category_name, state=CategoryStates.add_category)
+    dp.register_message_handler(process_edit_category_name, state=CategoryStates.edit_category)
+    dp.register_callback_query_handler(process_delete_category, lambda c: c.data.startswith("confirm_delete_category_"), state=CategoryStates.delete_category)
+    
+    # Secure note handlers
+    dp.register_message_handler(cmd_add_note, Text(equals="📋 Add Note"))
+    dp.register_message_handler(cmd_view_notes, Text(equals="📑 View Notes"))
+    dp.register_message_handler(process_note_title, state=SecureNoteStates.waiting_for_title)
+    dp.register_message_handler(process_note_content, state=SecureNoteStates.waiting_for_content)
+    dp.register_callback_query_handler(confirm_add_note, lambda c: c.data.startswith("confirm_"), state=SecureNoteStates.confirm_add)
+    dp.register_callback_query_handler(view_note, lambda c: c.data.startswith("view_note_"))
+    dp.register_callback_query_handler(update_note, lambda c: c.data.startswith("update_note_"))
+    dp.register_callback_query_handler(delete_note, lambda c: c.data.startswith("delete_note_"))
+    dp.register_callback_query_handler(back_to_notes_list, lambda c: c.data == "back_to_notes_list")
+    dp.register_callback_query_handler(process_notes_pagination, lambda c: c.data.startswith("notes_page_"))
+    
+    # Tools menu handlers
+    dp.register_message_handler(cmd_tools, Text(equals="⚒️ Tools"))
+    dp.register_message_handler(cmd_password_generator, Text(equals="🎲 Password Generator"))
+    dp.register_message_handler(cmd_import_passwords, Text(equals="🔄 Import Passwords"))
+    dp.register_message_handler(cmd_export_data, Text(equals="📤 Export Data"))
+    dp.register_message_handler(cmd_password_strength_checker, Text(equals="🔍 Password Strength Checker"))
+    dp.register_callback_query_handler(process_password_generator_options, lambda c: c.data.startswith(("toggle_", "set_length", "generate_password")))
+    dp.register_message_handler(process_password_length, state=PasswordGeneratorStates.set_length)
+    dp.register_message_handler(process_import_file, state=ImportExportStates.waiting_for_import_file)
+    dp.register_callback_query_handler(confirm_import, lambda c: c.data.startswith("confirm_"), state=ImportExportStates.confirm_import)
+    dp.register_callback_query_handler(export_data_format, lambda c: c.data.startswith("export_format_"), state=ImportExportStates.select_export_format)
+    dp.register_callback_query_handler(export_data_type, lambda c: c.data.startswith("export_type_"), state=ImportExportStates.select_export_type)
+    
     # Add password handlers
     dp.register_message_handler(
         process_service_name, 
@@ -1605,4 +3259,82 @@ def register_handlers(dp: Dispatcher):
     dp.register_callback_query_handler(
         back_to_main_callback, 
         lambda c: c.data == "back_to_main"
+    )
+    
+    # Tools handlers
+    dp.register_message_handler(cmd_tools, Text(equals="⚒️ Tools"))
+    
+    # Password generator handlers
+    dp.register_message_handler(cmd_password_generator, Text(equals="🎲 Password Generator"))
+    dp.register_callback_query_handler(
+        process_password_generator_options,
+        lambda c: c.data.startswith("toggle_") or c.data == "set_length" or c.data == "generate_password"
+    )
+    dp.register_message_handler(
+        process_password_length,
+        state=PasswordGeneratorStates.set_length
+    )
+    
+    # Password strength checker
+    dp.register_message_handler(cmd_password_strength_checker, Text(equals="🔍 Password Strength Checker"))
+    
+    # Import/Export handlers
+    dp.register_message_handler(cmd_import_passwords, Text(equals="🔄 Import Passwords"))
+    dp.register_message_handler(cmd_export_data, Text(equals="📤 Export Data"))
+    dp.register_message_handler(
+        process_import_file, 
+        content_types=types.ContentTypes.DOCUMENT,
+        state=ImportExportStates.waiting_for_import_file
+    )
+    dp.register_callback_query_handler(
+        confirm_import,
+        lambda c: c.data.startswith("confirm_"),
+        state=ImportExportStates.confirm_import
+    )
+    dp.register_callback_query_handler(
+        export_data_format,
+        lambda c: c.data.startswith("export_format_"),
+        state=ImportExportStates.select_export_format
+    )
+    dp.register_callback_query_handler(
+        export_data_type,
+        lambda c: c.data.startswith("export_type_"),
+        state=ImportExportStates.select_export_type
+    )
+    
+    # Secure Notes handlers
+    dp.register_message_handler(cmd_add_note, Text(equals="📝 Add Note"))
+    dp.register_message_handler(cmd_view_notes, Text(equals="📑 View Notes"))
+    dp.register_message_handler(
+        process_note_title,
+        state=SecureNoteStates.waiting_for_title
+    )
+    dp.register_message_handler(
+        process_note_content,
+        state=SecureNoteStates.waiting_for_content
+    )
+    dp.register_callback_query_handler(
+        confirm_add_note,
+        lambda c: c.data.startswith("confirm_"),
+        state=SecureNoteStates.confirm_add
+    )
+    dp.register_callback_query_handler(
+        view_note,
+        lambda c: c.data.startswith("view_note_")
+    )
+    dp.register_callback_query_handler(
+        update_note,
+        lambda c: c.data.startswith("update_note_")
+    )
+    dp.register_callback_query_handler(
+        delete_note,
+        lambda c: c.data.startswith("delete_note_")
+    )
+    dp.register_callback_query_handler(
+        back_to_notes_list,
+        lambda c: c.data == "back_to_notes"
+    )
+    dp.register_callback_query_handler(
+        process_notes_pagination,
+        lambda c: c.data.startswith("notes_page_")
     )
