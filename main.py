@@ -3,7 +3,6 @@ import logging
 from aiogram.utils import executor
 
 from bot import dp, on_startup, on_shutdown
-from app import app  # Import Flask app
 
 if __name__ == "__main__":
     # Configure logging
